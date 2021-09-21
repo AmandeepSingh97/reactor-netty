@@ -485,8 +485,8 @@ class ConnectionPoolTests extends BaseHttpTest {
 				.secure(sslContextSpec -> sslContextSpec.sslContext(clientCtx))
 				.protocol(HttpProtocol.H2);
 
-		Flux.range(0, 500)
-				.delayElements(Duration.ofMillis(20))
+		Flux.range(0, 20)
+				.delayElements(Duration.ofMillis(500))
 				.flatMap(item -> client.get()
 					.uri("https://localhost:" + server.port()+"/conn")
 					.responseContent()
@@ -495,7 +495,9 @@ class ConnectionPoolTests extends BaseHttpTest {
 				.collectList()
 				.block();
 
+		// assert only 1 connection was used and no recycling happened.
+		assertThat(connectionIdMap.size()).isEqualTo(1);
+		assertThat(connectionIdMap.entrySet().stream().findFirst().get().getValue()).isEqualTo(20);
 		System.out.println("Connection Id count: " + connectionIdMap);
-
 	}
 }
