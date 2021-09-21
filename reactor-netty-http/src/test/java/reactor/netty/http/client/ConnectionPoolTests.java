@@ -18,6 +18,7 @@ package reactor.netty.http.client;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.group.DefaultChannelGroup;
+import io.netty.handler.logging.LogLevel;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.handler.ssl.util.SelfSignedCertificate;
 import io.netty.resolver.DefaultAddressResolverGroup;
@@ -39,12 +40,16 @@ import reactor.netty.http.HttpProtocol;
 import reactor.netty.http.server.HttpServer;
 import reactor.netty.resources.ConnectionProvider;
 import reactor.netty.resources.LoopResources;
+import reactor.netty.transport.logging.AdvancedByteBufFormat;
 import reactor.util.annotation.Nullable;
 import reactor.util.function.Tuple2;
 
 import java.security.cert.CertificateException;
 import java.time.Duration;
+import java.util.HashMap;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -415,5 +420,82 @@ class ConnectionPoolTests extends BaseHttpTest {
 
 			assertThat(response2.get(0).getT2()).isNotSameAs(response1.get(0).getT2());
 		}
+	}
+
+	/**
+	 * We currently know that when HTTP2 pool gets created it does not inherit the
+	 * maxLifeTime property from the Parent pool.
+	 * Because of which till there are active streams, the same connection keeps on getting used
+	 * not respecting the maxLifeTime property.
+	 * Following testcase depicts the above scenario
+	 */
+	@Test
+	public void testHTTP2MaxLifeTime() throws CertificateException {
+
+		Duration maxLifeTime = Duration.ofSeconds(5);
+		int maxConnections = 1;
+		HashMap<String, Integer> connectionIdMap = new HashMap<>();
+
+		final SelfSignedCertificate ssc = new SelfSignedCertificate();
+		final Http2SslContextSpec serverCtx = Http2SslContextSpec.forServer(ssc.certificate(), ssc.privateKey());
+
+		final DisposableServer server = HttpServer.create()
+				.route(routes ->
+						routes.get("/conn", (req, resp) -> {
+							final AtomicReference<String> id = new AtomicReference<>();
+							final CountDownLatch latch = new CountDownLatch(1);
+							resp.withConnection(conn -> {
+								final String connID = conn.channel().id().asShortText();
+								String connIdExcludingStreamId = connID.split("/")[0];
+								if(connectionIdMap.containsKey(connIdExcludingStreamId)) {
+									connectionIdMap.put(connIdExcludingStreamId, connectionIdMap.get(connIdExcludingStreamId) + 1);
+								} else {
+									connectionIdMap.put(connIdExcludingStreamId, 1);
+								}
+								id.set(connID);
+								System.out.println("Serving with conn id: " + id.get());
+								latch.countDown();
+							});
+							try {
+								latch.await();
+								return resp
+										.addHeader("Content-Type", "text/plain")
+										.sendString(Mono.just(id.get()));
+							} catch (final Exception e) {
+								return resp.sendString(Mono.error(e));
+							}
+						})
+				)
+				.protocol(HttpProtocol.H2, HttpProtocol.HTTP11)
+				.secure(sslContextSpec -> sslContextSpec.sslContext(serverCtx))
+				.port(0)
+				.bindNow();
+
+
+		ConnectionProvider provider = ConnectionProvider.builder("MyTestPool")
+				.maxLifeTime(maxLifeTime)
+				.maxConnections(maxConnections)
+				.build();
+
+		Http2SslContextSpec clientCtx =
+				Http2SslContextSpec.forClient()
+						.configure(builder -> builder.trustManager(InsecureTrustManagerFactory.INSTANCE));
+
+		final HttpClient client =  HttpClient.create(provider)
+				.secure(sslContextSpec -> sslContextSpec.sslContext(clientCtx))
+				.protocol(HttpProtocol.H2);
+
+		Flux.range(0, 500)
+				.delayElements(Duration.ofMillis(20))
+				.flatMap(item -> client.get()
+					.uri("https://localhost:" + server.port()+"/conn")
+					.responseContent()
+					.aggregate()
+					.asString())
+				.collectList()
+				.block();
+
+		System.out.println("Connection Id count: " + connectionIdMap);
+
 	}
 }
