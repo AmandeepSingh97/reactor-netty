@@ -16,17 +16,32 @@
 package reactor.netty.resources;
 
 import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.Measurement;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelOutboundHandlerAdapter;
+import io.netty.channel.ChannelPromise;
+import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
+import io.netty.handler.ssl.util.SelfSignedCertificate;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.netty.BaseHttpTest;
+import reactor.netty.http.client.HttpClient;
 
+import javax.net.ssl.SSLException;
 import java.net.InetSocketAddress;
+import java.net.SocketAddress;
+import java.security.cert.CertificateException;
 import java.time.Duration;
+import java.util.Arrays;
+import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -38,8 +53,8 @@ import static reactor.netty.Metrics.ACTIVE_CONNECTIONS;
 import static reactor.netty.Metrics.CONNECTION_PROVIDER_PREFIX;
 import static reactor.netty.Metrics.ID;
 import static reactor.netty.Metrics.IDLE_CONNECTIONS;
-import static reactor.netty.Metrics.PENDING_CONNECTIONS;
 import static reactor.netty.Metrics.NAME;
+import static reactor.netty.Metrics.PENDING_CONNECTIONS;
 import static reactor.netty.Metrics.REMOTE_ADDRESS;
 import static reactor.netty.Metrics.TOTAL_CONNECTIONS;
 
@@ -62,14 +77,122 @@ class PooledConnectionProviderDefaultMetricsTest extends BaseHttpTest {
 		registry.close();
 	}
 
-	@Test
+	//@Test
 	void testConnectionProviderMetricsDisabledAndHttpClientMetricsEnabled() throws Exception {
 		doTest(ConnectionProvider.create("test", 1), true);
 	}
 
-	@Test
+	//@Test
 	void testConnectionProviderMetricsEnableAndHttpClientMetricsDisabled() throws Exception {
 		doTest(ConnectionProvider.builder("test").maxConnections(1).metrics(true).lifo().build(), false);
+	}
+
+	@Test
+	void testTimeForLoad() {
+		long start = System.currentTimeMillis();
+		LoadHandler.Load();
+		long end =System.currentTimeMillis();
+		System.out.println("Time taken: " + (end-start));
+	}
+
+
+	@Test
+	void testConnectionProviderMetricsUnderLoad() throws InterruptedException, SSLException, CertificateException {
+
+		System.setProperty("reactor.netty.ioWorkerCount", "4");
+
+		disposableServer =
+				createServer()
+						.handle((req, res) -> res.sendString(Mono.just("test")))
+						.bindNow();
+
+		ConnectionProvider provider = ConnectionProvider.builder("test")
+				.maxConnections(100)
+				.metrics(true)
+				.pendingAcquireMaxCount(-1)
+				.pendingAcquireTimeout(Duration.ofMillis(50))
+				.build();
+
+		AtomicBoolean addLoad = new AtomicBoolean(true);
+
+		final HttpClient client = HttpClient.create(provider)
+				.baseUrl("http://localhost:" + disposableServer.port())
+				.doOnChannelInit((observer, channel, address) -> {
+//					if (addLoad.get() && channel.pipeline().get("my-load") == null) {
+//						channel.pipeline().addFirst("my-load", new LoadHandler());
+//					}
+				})
+				.doOnRequest((req, conn) -> {
+					LoadHandler.Load();
+					printConnectionMetrics();
+				});
+
+
+		for(int i=0;i<150;i++) {
+			try {
+				client
+					.get()
+					.uri("/")
+					.responseContent()
+					.aggregate()
+					.asString()
+					.subscribe(System.out::println);
+				Thread.sleep(10);
+			} catch (Exception e) {
+				System.out.println(e);
+			}
+		}
+
+		Thread.sleep(Duration.ofMinutes(5).toMillis());
+		addLoad.set(false);
+		System.out.println("Sending final req after 60 seconds");
+		try {
+			final String resp = client
+					.get()
+					.uri("/")
+					.responseContent()
+					.aggregate()
+					.asString()
+					.block();
+			System.out.println(resp);
+		} catch (Exception e) {
+			System.out.println(e);
+		}
+		System.out.println("Final Metrics");
+		printConnectionMetrics();
+	}
+
+	private void callDownstream(HttpClient client, int numCalls, Duration delay) {
+		Flux.range(0, numCalls)
+				.delayElements(delay)
+				.flatMap(request -> client
+						.get()
+						.uri("/")
+						.responseContent()
+						.aggregate()
+						.asString()
+				)
+				.blockLast();
+	}
+
+	private void printConnectionMetrics() {
+		final Measurement totalConnections = Objects.requireNonNull(Metrics.globalRegistry.find("reactor.netty.connection.provider.total.connections")
+				.meter())
+				.measure().iterator().next();
+		final Measurement activeConnections = Objects.requireNonNull(Metrics.globalRegistry.find("reactor.netty.connection.provider.active.connections")
+				.meter())
+				.measure().iterator().next();
+		final Measurement idleConnections = Objects.requireNonNull(Metrics.globalRegistry.find("reactor.netty.connection.provider.idle.connections")
+				.meter())
+				.measure().iterator().next();
+		final Measurement pendingConnections = Objects.requireNonNull(Metrics.globalRegistry.find("reactor.netty.connection.provider.pending.connections")
+				.meter())
+				.measure().iterator().next();
+
+		System.out.println("\nTotal connections: " + totalConnections.getValue()
+				+ "\nActive connections: " + activeConnections.getValue()
+				+ "\nPending connections: " + pendingConnections.getValue()
+				+ "\nIdle connections: " + idleConnections.getValue());
 	}
 
 	private void doTest(ConnectionProvider provider, boolean clientMetricsEnabled) throws Exception {
@@ -138,4 +261,38 @@ class PooledConnectionProviderDefaultMetricsTest extends BaseHttpTest {
 		return result;
 	}
 
+}
+
+
+class LoadHandler extends ChannelOutboundHandlerAdapter {
+
+	private static AtomicReference<Double> junk = new AtomicReference<>();
+
+	@SuppressWarnings({"java:S2211", "java:S5612"})
+	@Override
+	public void connect(ChannelHandlerContext ctx,
+	                    SocketAddress remoteAddress,
+	                    SocketAddress localAddress,
+	                    ChannelPromise promise) throws Exception {
+		promise.addListener(future ->
+		{
+			if(future.isSuccess()) {
+				Load();
+			}
+		});
+
+		//ctx.pipeline().remove("my-load");
+		super.connect(ctx, remoteAddress, localAddress, promise);
+	}
+
+	public static void Load() {
+		for (int i = 9999; i >= 1; i--) {
+			for (int j = 2000; j >= 1; j--) {
+				double pow = Math.pow(i, j);
+				double sqrt = Math.sqrt(pow);
+				junk.set(sqrt);
+			}
+		}
+		System.out.println("Finished the for loops");
+	}
 }
