@@ -107,8 +107,9 @@ class PooledConnectionProviderDefaultMetricsTest extends BaseHttpTest {
 						.bindNow();
 
 		ConnectionProvider provider = ConnectionProvider.builder("test")
-				.maxConnections(100)
+				.maxConnections(10)
 				.metrics(true)
+				.maxIdleTime(Duration.ofSeconds(60))
 				.pendingAcquireMaxCount(-1)
 				.pendingAcquireTimeout(Duration.ofMillis(50))
 				.build();
@@ -118,61 +119,49 @@ class PooledConnectionProviderDefaultMetricsTest extends BaseHttpTest {
 		final HttpClient client = HttpClient.create(provider)
 				.baseUrl("http://localhost:" + disposableServer.port())
 				.doOnChannelInit((observer, channel, address) -> {
-//					if (addLoad.get() && channel.pipeline().get("my-load") == null) {
-//						channel.pipeline().addFirst("my-load", new LoadHandler());
-//					}
+					if (addLoad.get() && channel.pipeline().get("my-load") == null) {
+						channel.pipeline().addFirst("my-load", new LoadHandler());
+					}
 				})
 				.doOnRequest((req, conn) -> {
-					LoadHandler.Load();
+					if(addLoad.get()) {
+						LoadHandler.Load();
+					}
 					printConnectionMetrics();
 				});
 
+		Thread secondary = new Thread( () -> callDownstream(client, 20, Duration.ofMillis(1000)));
+		secondary.start();
 
-		for(int i=0;i<150;i++) {
-			try {
-				client
-					.get()
-					.uri("/")
-					.responseContent()
-					.aggregate()
-					.asString()
-					.subscribe(System.out::println);
-				Thread.sleep(10);
-			} catch (Exception e) {
-				System.out.println(e);
-			}
-		}
+		// Wait for a minute before sending midway request
+		Thread.sleep(Duration.ofMinutes(2).toMillis());
+
+		System.out.println("Sending midway request");
+		addLoad.set(false);
+		callDownstream(client, 1, Duration.ZERO);
 
 		Thread.sleep(Duration.ofMinutes(5).toMillis());
-		addLoad.set(false);
-		System.out.println("Sending final req after 60 seconds");
-		try {
-			final String resp = client
-					.get()
-					.uri("/")
-					.responseContent()
-					.aggregate()
-					.asString()
-					.block();
-			System.out.println(resp);
-		} catch (Exception e) {
-			System.out.println(e);
-		}
-		System.out.println("Final Metrics");
-		printConnectionMetrics();
+
+		System.out.println("Sending final req");
+		callDownstream(client, 1, Duration.ZERO);
 	}
 
 	private void callDownstream(HttpClient client, int numCalls, Duration delay) {
 		Flux.range(0, numCalls)
 				.delayElements(delay)
+				.map(integer -> {
+					System.out.println("\nSending request no. " + integer);
+					return integer;
+				})
 				.flatMap(request -> client
 						.get()
 						.uri("/")
 						.responseContent()
 						.aggregate()
 						.asString()
+						.onErrorResume(throwable -> true, throwable -> Mono.just(throwable.getMessage()))
 				)
-				.blockLast();
+				.subscribe(System.out::println);
 	}
 
 	private void printConnectionMetrics() {
@@ -287,7 +276,7 @@ class LoadHandler extends ChannelOutboundHandlerAdapter {
 
 	public static void Load() {
 		for (int i = 9999; i >= 1; i--) {
-			for (int j = 2000; j >= 1; j--) {
+			for (int j = 9999; j >= 1; j--) {
 				double pow = Math.pow(i, j);
 				double sqrt = Math.sqrt(pow);
 				junk.set(sqrt);
