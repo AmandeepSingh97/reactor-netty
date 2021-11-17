@@ -15,7 +15,7 @@
  */
 import me.champeau.gradle.japicmp.JapicmpTask
 
-apply plugin: 'io.spring.javadoc'
+//apply plugin: 'io.spring.javadoc'
 apply plugin: 'me.champeau.gradle.japicmp'
 apply plugin: 'de.undercouch.download'
 apply plugin: 'biz.aQute.bnd.builder'

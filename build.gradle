@@ -36,8 +36,8 @@ plugins {
 	id 'com.jfrog.artifactory' version '4.16.1' apply false
 	id 'me.champeau.gradle.japicmp' version '0.2.9' apply false
 	id 'de.undercouch.download' version '4.1.1' apply false
-	id 'io.spring.javadoc' version '0.0.1' apply false
-	id 'io.spring.javadoc-aggregate' version '0.0.1' apply false
+	//id 'io.spring.javadoc' version '0.0.1' apply false
+	//id 'io.spring.javadoc-aggregate' version '0.0.1' apply false
 	id 'biz.aQute.bnd.builder' version '5.2.0' apply false
 }
 

@@ -17,7 +17,7 @@ import aQute.bnd.gradle.BundleTaskConvention
 import me.champeau.gradle.japicmp.JapicmpTask
 
 apply plugin: 'java-test-fixtures'
-apply plugin: 'io.spring.javadoc'
+//apply plugin: 'io.spring.javadoc'
 apply plugin: 'com.github.johnrengelman.shadow'
 apply plugin: 'me.champeau.gradle.japicmp'
 apply plugin: 'de.undercouch.download'
